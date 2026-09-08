@@ -1,0 +1,177 @@
+---
+# httpd_aws.yml
+#
+# Play 1: instala y configura httpd en las instancias del inventario
+# Play 2: publica el registro A en la zona Route53 del sandbox
+#
+# Extra variables sugeridas en el Job Template (Prompt on launch activado):
+#   app_version: v1.0.0
+#   dns_record:  app.sandbox15.opentlc.com
+
+- name: Desplegar httpd en las instancias
+  hosts: all
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+
+  vars:
+    app_version: "v1.0.0"
+    http_port: 80
+    doc_root: /var/www/html
+    manage_firewall: true
+
+  tasks:
+    - name: Instalar httpd
+      ansible.builtin.dnf:
+        name:
+          - httpd
+        state: present
+
+    - name: Escribir la configuracion del sitio
+      ansible.builtin.copy:
+        dest: /etc/httpd/conf.d/app.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          <VirtualHost *:{{ http_port }}>
+              DocumentRoot {{ doc_root }}
+              ErrorLog  logs/app_error.log
+              CustomLog logs/app_access.log combined
+
+              <Directory {{ doc_root }}>
+                  Require all granted
+                  Options -Indexes
+              </Directory>
+          </VirtualHost>
+      notify: Restart httpd
+
+    - name: Publicar el contenido de la aplicacion
+      ansible.builtin.copy:
+        dest: "{{ doc_root }}/index.html"
+        owner: apache
+        group: apache
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="es">
+            <head><meta charset="utf-8"><title>App {{ app_version }}</title></head>
+            <body>
+              <h1>Despliegue correcto</h1>
+              <p>Version: {{ app_version }}</p>
+              <p>Host: {{ inventory_hostname }}</p>
+            </body>
+          </html>
+
+    - name: Crear el endpoint de health check
+      ansible.builtin.copy:
+        dest: "{{ doc_root }}/healthz"
+        owner: apache
+        group: apache
+        mode: "0644"
+        content: "ok"
+
+    - name: Validar la sintaxis de httpd antes de reiniciar
+      ansible.builtin.command:
+        cmd: apachectl configtest
+      changed_when: false
+
+    - name: Abrir el puerto http en firewalld
+      ansible.posix.firewalld:
+        service: http
+        permanent: true
+        immediate: true
+        state: enabled
+      when: manage_firewall | bool
+      failed_when: false
+
+    - name: Arrancar y habilitar httpd
+      ansible.builtin.service:
+        name: httpd
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart httpd
+      ansible.builtin.service:
+        name: httpd
+        state: restarted
+
+  post_tasks:
+    - name: Health check local
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ http_port }}/healthz"
+        status_code: 200
+      register: health
+      retries: 6
+      delay: 5
+      until: health.status is defined and health.status == 200
+
+
+- name: Publicar el registro en Route53
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    aws_region: us-east-1
+    hosted_zone_id: "Z18SY4D4PIURK4"
+    dns_record: "app.sandbox15.opentlc.com"
+    dns_ttl: 60
+    manage_dns: true
+
+  tasks:
+    - name: Recolectar las IPs publicas de las instancias
+      ansible.builtin.set_fact:
+        target_ips: "{{ (target_ips | default([])) + [ip] }}"
+      vars:
+        ip: "{{ hostvars[item].public_ip_address | default(hostvars[item].ansible_host, true) | default('', true) }}"
+      loop: "{{ groups['all'] | difference(['localhost']) }}"
+      when: ip | length > 0
+
+    - name: Normalizar la lista
+      ansible.builtin.set_fact:
+        target_ips: "{{ target_ips | default([]) | unique }}"
+
+    - name: Avisar si no hay IPs publicas
+      ansible.builtin.debug:
+        msg: >-
+          No se encontraron IPs publicas en el inventario, se omite Route53.
+          Revisa que el inventario sea la fuente dinamica amazon.aws.ec2
+          y que las instancias tengan IP publica asignada.
+      when: target_ips | length == 0
+
+    - name: Crear o actualizar el registro A
+      amazon.aws.route53:
+        state: present
+        hosted_zone_id: "{{ hosted_zone_id }}"
+        record: "{{ dns_record }}"
+        type: A
+        ttl: "{{ dns_ttl }}"
+        value: "{{ target_ips }}"
+        overwrite: true
+        wait: true
+        region: "{{ aws_region }}"
+      when:
+        - manage_dns | bool
+        - target_ips | length > 0
+
+    - name: Comprobar que el sitio responde por el dominio
+      ansible.builtin.uri:
+        url: "http://{{ dns_record }}/healthz"
+        status_code: 200
+      register: public_check
+      retries: 10
+      delay: 15
+      until: public_check.status is defined and public_check.status == 200
+      failed_when: false
+      when:
+        - manage_dns | bool
+        - target_ips | length > 0
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg: >-
+          Desplegado en {{ target_ips | length }} host(s): {{ target_ips | join(', ') }}.
+          DNS: http://{{ dns_record }}
+      when: target_ips | length > 0
