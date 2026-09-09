@@ -30,7 +30,7 @@
         event.payload.deleted == false
       action:
         run_job_template:
-          name: "AWS.EC2 DEPLOY"
+          name: "AWS. EC2 DEPLOY"
           organization: "Default"
           job_args:
             extra_vars:
