@@ -29,8 +29,8 @@
         event.payload.ref == "refs/heads/main" and
         event.payload.deleted == false
       action:
-        run_job_template:
-          name: "AWS. EC2 DEPLOY"
+        run_workflow_template:
+          name: "Deploy And Sync Project"
           organization: "Default"
           job_args:
             extra_vars:
