@@ -171,7 +171,6 @@
         value: "{{ target_ips }}"
         overwrite: true
         wait: true
-        region: "{{ aws_region }}"
       when:
         - manage_dns | bool
         - target_ips | length > 0
