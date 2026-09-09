@@ -32,10 +32,7 @@
         run_workflow_template:
           name: "Deploy And Sync Project"
           organization: "Default"
-          job_args:
-            extra_vars:
-              app_version: "{{ event.payload.after }}"
-              triggered_by: "{{ event.payload.pusher.name }}"
+          
 
     - name: Push a otra rama -> ignorar
       condition: >-
