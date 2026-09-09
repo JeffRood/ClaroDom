@@ -4,12 +4,18 @@
 # Play 1: instala y configura httpd en las instancias del inventario
 # Play 2: publica el registro A en la zona Route53 del sandbox
 #
-# Extra variables sugeridas en el Job Template (Prompt on launch activado):
-#   app_version: v1.0.0
-#   dns_record:  app.sandbox15.opentlc.com
+# Credenciales que debe llevar adjuntas el Job Template:
+#   - Machine              -> SSH a las instancias (play 1)
+#   - Amazon Web Services  -> claves IAM, las lee boto3 del entorno (play 2)
+#   - Sandbox Config       -> inyecta hosted_zone_id, aws_region y dns_domain
+#
+# Extra variables sugeridas (Prompt on launch activado):
+#   app_version:  v1.0.0
+#   dns_name:     app
+#   target_hosts: all
 
 - name: Desplegar httpd en las instancias
-  hosts: all
+  hosts: "{{ target_hosts | default('all') }}"
   become: true
   serial: 1
   max_fail_percentage: 0
@@ -114,13 +120,27 @@
   connection: local
 
   vars:
-    aws_region: us-east-1
-    hosted_zone_id: "Z18SY4D4PIURK4"
-    dns_record: "app.sandbox15.opentlc.com"
+    aws_region: us-east-2
     dns_ttl: 60
     manage_dns: true
+    dns_name: app
 
   tasks:
+    - name: Validar que la credencial Sandbox Config esta adjunta
+      ansible.builtin.assert:
+        that:
+          - hosted_zone_id is defined
+          - dns_domain is defined
+        fail_msg: >-
+          Faltan hosted_zone_id o dns_domain. Adjunta la credencial
+          'Sandbox 15 Config' al job template, o pasalos por extra_vars.
+      when: manage_dns | bool
+
+    - name: Construir el FQDN
+      ansible.builtin.set_fact:
+        dns_record: "{{ dns_name }}.{{ dns_domain | regex_replace('^\\.', '') }}"
+      when: manage_dns | bool
+
     - name: Recolectar las IPs publicas de las instancias
       ansible.builtin.set_fact:
         target_ips: "{{ (target_ips | default([])) + [ip] }}"
@@ -173,5 +193,5 @@
       ansible.builtin.debug:
         msg: >-
           Desplegado en {{ target_ips | length }} host(s): {{ target_ips | join(', ') }}.
-          DNS: http://{{ dns_record }}
+          DNS: http://{{ dns_record | default('no configurado') }}
       when: target_ips | length > 0

@@ -1,0 +1,70 @@
+---
+# destroy_ec2.yml
+# Borra el registro DNS y termina las instancias etiquetadas.
+# Se ejecuta solo despues de que alguien apruebe el nodo del workflow.
+
+- name: Destruir la infraestructura
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    aws_region: us-east-2
+    app_name: miapp
+    env_name: demo
+    sg_name: miapp-sg
+    dns_name: app
+    remove_sg: false
+
+  tasks:
+    - name: Buscar las instancias por tag
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:App": "{{ app_name }}"
+          "tag:Env": "{{ env_name }}"
+          instance-state-name: ["running", "stopped", "pending"]
+      register: found
+
+    - name: Informar que no hay nada que borrar
+      ansible.builtin.debug:
+        msg: "No se encontraron instancias con App={{ app_name }} Env={{ env_name }}"
+      when: found.instances | length == 0
+
+    - name: Borrar el registro A de Route53
+      amazon.aws.route53:
+        state: absent
+        hosted_zone_id: "{{ hosted_zone_id }}"
+        record: "{{ dns_name }}.{{ dns_domain | regex_replace('^\\.', '') }}"
+        type: A
+        ttl: 60
+        value: "{{ found.instances | map(attribute='public_ip_address') | select('string') | list }}"
+        region: "{{ aws_region }}"
+      when:
+        - found.instances | length > 0
+        - hosted_zone_id is defined
+        - dns_domain is defined
+      failed_when: false
+
+    - name: Terminar las instancias
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ found.instances | map(attribute='instance_id') | list }}"
+        state: absent
+        wait: true
+        wait_timeout: 600
+      when: found.instances | length > 0
+
+    - name: Borrar el security group
+      amazon.aws.ec2_security_group:
+        name: "{{ sg_name }}"
+        region: "{{ aws_region }}"
+        state: absent
+      when: remove_sg | bool
+      failed_when: false
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg: >-
+          Terminadas {{ found.instances | length }} instancia(s).
+          Registro DNS eliminado.
