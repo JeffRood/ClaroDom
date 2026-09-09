@@ -1,0 +1,46 @@
+---
+# rulebooks/github-deploy.yml
+#
+# Escucha eventos de GitHub a traves de un Event Stream de AAP y,
+# en cada push a main, lanza el job template de despliegue.
+#
+# En la Rulebook Activation, la fuente "ansible.eda.webhook" se
+# reemplaza por el Event Stream de GitHub (mapeo en la UI).
+
+- name: Desplegar en cada push a main
+  hosts: all
+
+  sources:
+    - name: github
+      ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+
+    - name: Ping de GitHub al crear el webhook
+      condition: event.payload.zen is defined
+      action:
+        debug:
+          msg: "Webhook de GitHub conectado correctamente"
+
+    - name: Push a main -> desplegar
+      condition: >-
+        event.payload.ref == "refs/heads/main" and
+        event.payload.deleted == false
+      action:
+        run_job_template:
+          name: "Deploy HTTPD AWS"
+          organization: "Default"
+          job_args:
+            extra_vars:
+              app_version: "{{ event.payload.after }}"
+              triggered_by: "{{ event.payload.pusher.name }}"
+
+    - name: Push a otra rama -> ignorar
+      condition: >-
+        event.payload.ref is defined and
+        event.payload.ref != "refs/heads/main"
+      action:
+        debug:
+          msg: "Push a {{ event.payload.ref }}, no se despliega"
