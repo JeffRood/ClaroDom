@@ -1,7 +1,16 @@
 ---
 # destroy_ec2.yml
-# Borra el registro DNS y termina las instancias etiquetadas.
-# Se ejecuta solo despues de que alguien apruebe el nodo del workflow.
+#
+# Borra el entorno completo en el orden que AWS exige:
+#   registro DNS -> instancias -> security group -> tabla de rutas ->
+#   subred -> internet gateway -> VPC
+#
+# Por defecto SOLO borra las instancias. Para arrasar con la red tambien,
+# pasa destroy_network: true en las extra variables.
+#
+# Credenciales del Job Template:
+#   - Amazon Web Services
+#   - Sandbox Config   (solo si quieres que borre el registro DNS)
 
 - name: Destruir la infraestructura
   hosts: localhost
@@ -12,11 +21,17 @@
     aws_region: us-east-2
     app_name: ClaroRedHat
     env_name: demo
-    sg_name: miapp-sg
     dns_name: app
-    remove_sg: false
+    destroy_network: false
+
+    vpc_name: "{{ app_name }}-vpc"
+    subnet_cidr: "10.0.1.0/24"
+    sg_name: "{{ app_name }}-sg"
 
   tasks:
+
+    # ---------------- INSTANCIAS ----------------
+
     - name: Buscar las instancias por tag
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
@@ -26,9 +41,9 @@
           instance-state-name: ["running", "stopped", "pending"]
       register: found
 
-    - name: Informar que no hay nada que borrar
+    - name: Informar si no hay instancias
       ansible.builtin.debug:
-        msg: "No se encontraron instancias con App={{ app_name }} Env={{ env_name }}"
+        msg: "No hay instancias activas con App={{ app_name }} Env={{ env_name }}"
       when: found.instances | length == 0
 
     - name: Borrar el registro A de Route53
@@ -55,16 +70,93 @@
         wait_timeout: 600
       when: found.instances | length > 0
 
+    # ---------------- RED (solo con destroy_network: true) ----------------
+
+    - name: Localizar la VPC del entorno
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ vpc_name }}"
+      register: vpc_found
+      when: destroy_network | bool
+
+    - name: Preparar el borrado de red
+      ansible.builtin.set_fact:
+        vpc_id: "{{ vpc_found.vpcs[0].vpc_id }}"
+      when:
+        - destroy_network | bool
+        - vpc_found.vpcs | default([]) | length > 0
+
     - name: Borrar el security group
       amazon.aws.ec2_security_group:
         name: "{{ sg_name }}"
+        vpc_id: "{{ vpc_id }}"
         region: "{{ aws_region }}"
         state: absent
-      when: remove_sg | bool
+      when: destroy_network | bool and vpc_id is defined
+      retries: 5
+      delay: 15
+      register: sg_del
+      until: sg_del is not failed
+      failed_when: false
+
+    - name: Buscar las tablas de rutas de la VPC
+      amazon.aws.ec2_vpc_route_table_info:
+        region: "{{ aws_region }}"
+        filters:
+          vpc-id: "{{ vpc_id }}"
+      register: rt_found
+      when: destroy_network | bool and vpc_id is defined
+
+    - name: Borrar las tablas de rutas no principales
+      amazon.aws.ec2_vpc_route_table:
+        route_table_id: "{{ item.route_table_id }}"
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        lookup: id
+        state: absent
+      loop: "{{ rt_found.route_tables | default([]) }}"
+      loop_control:
+        label: "{{ item.route_table_id }}"
+      when:
+        - destroy_network | bool
+        - vpc_id is defined
+        - not (item.associations | selectattr('main', 'defined') | selectattr('main') | list | length > 0)
+      failed_when: false
+
+    - name: Borrar la subred
+      amazon.aws.ec2_vpc_subnet:
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ subnet_cidr }}"
+        region: "{{ aws_region }}"
+        state: absent
+      when: destroy_network | bool and vpc_id is defined
+      failed_when: false
+
+    - name: Borrar el internet gateway
+      amazon.aws.ec2_vpc_igw:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        state: absent
+      when: destroy_network | bool and vpc_id is defined
+      failed_when: false
+
+    - name: Borrar la VPC
+      amazon.aws.ec2_vpc_net:
+        name: "{{ vpc_name }}"
+        cidr_block: "{{ vpc_cidr | default('10.0.0.0/16') }}"
+        region: "{{ aws_region }}"
+        state: absent
+      when: destroy_network | bool and vpc_id is defined
+      retries: 3
+      delay: 20
+      register: vpc_del
+      until: vpc_del is not failed
       failed_when: false
 
     - name: Resumen
       ansible.builtin.debug:
         msg: >-
-          Terminadas {{ found.instances | length }} instancia(s).
-          Registro DNS eliminado.
+          Terminadas {{ found.instances | length }} instancia(s)
+          con App={{ app_name }} Env={{ env_name }}.
+          Red: {{ 'borrada' if destroy_network | bool else 'conservada' }}.
