@@ -1,7 +1,7 @@
 ---
 # httpd_aws.yml
 #
-# Play 1: instala y configura httpd en las instancias del inventario
+# Play 1: instala httpd y publica el sitio que vive en site/ dentro del repo
 # Play 2: publica el registro A en la zona Route53 del sandbox
 #
 # Credenciales que debe llevar adjuntas el Job Template:
@@ -13,6 +13,11 @@
 #   app_version:  v1.0.0
 #   dns_name:     app
 #   target_hosts: all
+#
+# Estructura esperada en el repo:
+#   playbooks/httpd_aws.yml   (este archivo)
+#   site/index.html
+#   site/healthz
 
 - name: Desplegar httpd en las instancias
   hosts: "{{ target_hosts | default('all') }}"
@@ -25,6 +30,7 @@
     http_port: 80
     doc_root: /var/www/html
     manage_firewall: true
+    site_dir: "{{ playbook_dir }}/../site/"
 
   tasks:
     - name: Instalar httpd
@@ -52,24 +58,27 @@
           </VirtualHost>
       notify: Restart httpd
 
-    - name: Publicar el contenido de la aplicacion
+    - name: Publicar el sitio desde el repo
       ansible.builtin.copy:
-        dest: "{{ doc_root }}/index.html"
+        src: "{{ site_dir }}"
+        dest: "{{ doc_root }}/"
         owner: apache
         group: apache
         mode: "0644"
-        content: |
-          <!doctype html>
-          <html lang="es">
-            <head><meta charset="utf-8"><title>App {{ app_version }}</title></head>
-            <body>
-              <h1>Despliegue correcto</h1>
-              <p>Version: {{ app_version }}</p>
-              <p>Host: {{ inventory_hostname }}</p>
-            </body>
-          </html>
+        directory_mode: "0755"
 
-    - name: Crear el endpoint de health check
+    - name: Inyectar version y hostname en la pagina
+      ansible.builtin.replace:
+        path: "{{ doc_root }}/index.html"
+        regexp: "{{ item.re }}"
+        replace: "{{ item.val }}"
+      loop:
+        - { re: "__APP_VERSION__", val: "{{ app_version }}" }
+        - { re: "__HOSTNAME__", val: "{{ inventory_hostname }}" }
+      loop_control:
+        label: "{{ item.re }}"
+
+    - name: Asegurar el endpoint de health check
       ansible.builtin.copy:
         dest: "{{ doc_root }}/healthz"
         owner: apache
