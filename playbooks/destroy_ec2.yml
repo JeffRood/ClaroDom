@@ -10,7 +10,7 @@
 
   vars:
     aws_region: us-east-2
-    app_name: miapp
+    app_name: ClaroRedHat
     env_name: demo
     sg_name: miapp-sg
     dns_name: app

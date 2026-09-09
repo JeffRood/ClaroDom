@@ -23,7 +23,7 @@
     aws_region: us-east-2
     app_name: miapp
     env_name: demo
-    instance_type: t3.micro
+    instance_type: t3.small
     instance_count: 1
     key_name: sandbox-key
 
